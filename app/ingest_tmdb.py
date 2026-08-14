@@ -210,8 +210,12 @@ def build_config(args: argparse.Namespace) -> IngestConfig:
     api_key = os.getenv("TMDB_API_KEY", "").strip()
     if not api_key:
         raise ValueError("TMDB_API_KEY is required.")
-    if args.start_year > args.end_year:
-        raise ValueError("start-year must be <= end-year.")
+    # Normalize year order: always iterate from lowest -> highest.
+    start_year = args.start_year
+    end_year = args.end_year
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+        print(f"Note: swapped start/end years to iterate ascending: {start_year}..{end_year}")
     if args.full_refresh and not args.allow_truncate:
         raise ValueError(
             "Refusing to truncate catalog. Use --full-refresh --allow-truncate only if you really want to rebuild."
@@ -226,8 +230,8 @@ def build_config(args: argparse.Namespace) -> IngestConfig:
 
     return IngestConfig(
         api_key=api_key,
-        start_year=args.start_year,
-        end_year=args.end_year,
+        start_year=start_year,
+        end_year=end_year,
         output_path=resolved_output,
         timeout_seconds=max(1, args.timeout_seconds),
         retry_count=max(0, args.retry_count),
