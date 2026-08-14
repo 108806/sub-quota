@@ -172,6 +172,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def prompt_years_interactive(default_start: int, default_end: int) -> tuple[int, int]:
+    if not sys.stdin.isatty():
+        return default_start, default_end
+
+    prompt = (
+        f"Enter year range to fetch (start-end) [default: {default_start}-{default_end}]: "
+    )
+    try:
+        resp = input(prompt).strip()
+    except EOFError:
+        return default_start, default_end
+
+    if not resp:
+        return default_start, default_end
+
+    # Accept formats: '2000-2020' or '2000 2020' or single year '2005'
+    sep = "-" if "-" in resp else None
+    parts = resp.split(sep) if sep else resp.split()
+    try:
+        if len(parts) == 1:
+            start = int(parts[0])
+            end = default_end
+        else:
+            start = int(parts[0])
+            end = int(parts[1])
+        if start > end:
+            print("Invalid range: start > end; using defaults.")
+            return default_start, default_end
+        return start, end
+    except Exception:
+        print("Could not parse input; using default year range.")
+        return default_start, default_end
+
+
 def build_config(args: argparse.Namespace) -> IngestConfig:
     api_key = os.getenv("TMDB_API_KEY", "").strip()
     if not api_key:
@@ -444,21 +478,28 @@ def state_path_for_output(output_path: Path) -> Path:
 
 def load_existing_tmdb_ids(output_path: Path) -> set[int]:
     ids: set[int] = set()
-    if not output_path.exists() or not output_path.is_file():
+    catalog_dir = output_path.parent
+    if not catalog_dir.exists() or not catalog_dir.is_dir():
         return ids
 
-    with output_path.open("r", encoding="utf-8") as input_file:
-        for line in input_file:
-            raw = line.strip()
-            if not raw:
-                continue
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            tmdb_id = record.get("tmdb_id")
-            if isinstance(tmdb_id, int):
-                ids.add(tmdb_id)
+    for path in sorted(catalog_dir.glob("*.jsonl")):
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as input_file:
+                for line in input_file:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    tmdb_id = record.get("tmdb_id")
+                    if isinstance(tmdb_id, int):
+                        ids.add(tmdb_id)
+        except OSError:
+            continue
 
     return ids
 
@@ -510,7 +551,7 @@ def run(config: IngestConfig) -> int:
     sync_state_path = state_path_for_output(config.output_path)
 
     print("=" * 90)
-    print(f"CATALOG OUTPUT FILE: {config.output_path}")
+    print(f"CATALOG OUTPUT DIR : {config.output_path.parent}")
     print(f"SYNC STATE FILE    : {sync_state_path}")
     print("MODE               : append-only (existing records are never removed)")
     print("=" * 90)
@@ -519,8 +560,7 @@ def run(config: IngestConfig) -> int:
         print("Full refresh enabled: rebuilding output and resetting sync state.")
         seen_tmdb_ids: set[int] = set()
         completed_years: set[int] = set()
-        in_progress_pages: dict[str, int] = {}
-        output_mode = "w"
+        in_progress_pages: dict[str, dict[str, Any]] = {}
     else:
         seen_tmdb_ids = load_existing_tmdb_ids(config.output_path)
         state = load_sync_state(sync_state_path)
@@ -534,7 +574,6 @@ def run(config: IngestConfig) -> int:
             for key, value in state.get("in_progress_pages", {}).items()
             if isinstance(key, str) and isinstance(value, dict)
         }
-        output_mode = "a"
 
     print(f"Existing movies in catalog: {len(seen_tmdb_ids)}")
     print(f"Output file exists now: {config.output_path.exists()}")
@@ -543,26 +582,30 @@ def run(config: IngestConfig) -> int:
     total_new_written = 0
     skipped_years = 0
 
-    with config.output_path.open(output_mode, encoding="utf-8", newline="\n") as output_file:
-        for year_index, year in enumerate(range(config.start_year, config.end_year + 1), start=1):
-            if (
-                not config.recheck_completed_years
-                and year in completed_years
-                and year < current_year
-            ):
-                skipped_years += 1
-                year_pct = (year_index / total_years) * 100
-                print(
-                    f"Skipping year {year}: already complete "
-                    f"({year_index}/{total_years}, {year_pct:.2f}%)."
-                )
-                continue
+    for year_index, year in enumerate(range(config.start_year, config.end_year + 1), start=1):
+        if (
+            not config.recheck_completed_years
+            and year in completed_years
+            and year < current_year
+        ):
+            skipped_years += 1
+            year_pct = (year_index / total_years) * 100
+            print(
+                f"Skipping year {year}: already complete "
+                f"({year_index}/{total_years}, {year_pct:.2f}%)."
+            )
+            continue
 
-            print(f"Starting year {year} ({year_index}/{total_years})...")
-            year_new_written = 0
-            year_fetched = 0
-            resume_cursor = in_progress_pages.get(str(year)) if isinstance(in_progress_pages.get(str(year)), dict) else None
-            page_batches = iter_movie_pages_for_year(year, config, resume_cursor=resume_cursor)
+        print(f"Starting year {year} ({year_index}/{total_years})...")
+        year_new_written = 0
+        year_fetched = 0
+        resume_cursor = in_progress_pages.get(str(year)) if isinstance(in_progress_pages.get(str(year)), dict) else None
+        page_batches = iter_movie_pages_for_year(year, config, resume_cursor=resume_cursor)
+
+        # Open per-year catalog file
+        year_file = config.output_path.parent / f"movies_{year}.jsonl"
+        file_mode = "w" if config.full_refresh else "a"
+        with year_file.open(file_mode, encoding="utf-8", newline="\n") as output_file:
             for _window_idx, _window_count, page, _page_total, start_date, end_date, movies in page_batches:
                 total_raw += len(movies)
                 year_fetched += len(movies)
@@ -594,45 +637,46 @@ def run(config: IngestConfig) -> int:
                     end_year=config.end_year,
                 )
 
+            # Ensure year file durability
             output_file.flush()
             os.fsync(output_file.fileno())
 
-            total_new_written += year_new_written
-            completed_years.add(year)
-            in_progress_pages = {}
-            persist_sync_state(
-                state_path=sync_state_path,
-                completed_years=completed_years,
-                in_progress_pages=in_progress_pages,
-                output_path=config.output_path,
-                catalog_unique_count=len(seen_tmdb_ids),
-                start_year=config.start_year,
-                end_year=config.end_year,
+        total_new_written += year_new_written
+        completed_years.add(year)
+        in_progress_pages = {}
+        persist_sync_state(
+            state_path=sync_state_path,
+            completed_years=completed_years,
+            in_progress_pages=in_progress_pages,
+            output_path=config.output_path,
+            catalog_unique_count=len(seen_tmdb_ids),
+            start_year=config.start_year,
+            end_year=config.end_year,
+        )
+
+        year_pct = (year_index / total_years) * 100
+        elapsed = time.time() - started
+        try:
+            file_size = year_file.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to stat output file after year {year}: {config.output_path}"
+            ) from exc
+        if file_size <= 0:
+            raise RuntimeError(
+                f"Output file is empty after year {year}, save verification failed: {year_file}"
             )
 
-            year_pct = (year_index / total_years) * 100
-            elapsed = time.time() - started
-            try:
-                file_size = config.output_path.stat().st_size
-            except OSError as exc:
-                raise RuntimeError(
-                    f"Failed to stat output file after year {year}: {config.output_path}"
-                ) from exc
-            if file_size <= 0:
-                raise RuntimeError(
-                    f"Output file is empty after year {year}, save verification failed: {config.output_path}"
-                )
-
-            print(
-                f"Year {year} complete: fetched={year_fetched} "
-                f"new_this_year={year_new_written} total_new_written={total_new_written} "
-                f"overall_year_progress={year_index}/{total_years} ({year_pct:.2f}%) "
-                f"elapsed={elapsed:.1f}s"
-            )
-            print(
-                f"Saved and verified year {year} to {config.output_path} "
-                f"(bytes={file_size})"
-            )
+        print(
+            f"Year {year} complete: fetched={year_fetched} "
+            f"new_this_year={year_new_written} total_new_written={total_new_written} "
+            f"overall_year_progress={year_index}/{total_years} ({year_pct:.2f}%) "
+            f"elapsed={elapsed:.1f}s"
+        )
+        print(
+            f"Saved and verified year {year} to {year_file} "
+            f"(bytes={file_size})"
+        )
 
     duration = time.time() - started
     print(
@@ -647,6 +691,10 @@ def run(config: IngestConfig) -> int:
 def main() -> int:
     load_dotenv()
     args = parse_args()
+    # If running interactively, allow user to confirm or override year range.
+    start_year, end_year = prompt_years_interactive(args.start_year, args.end_year)
+    args.start_year = start_year
+    args.end_year = end_year
     try:
         config = build_config(args)
         return run(config)
