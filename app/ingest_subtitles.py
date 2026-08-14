@@ -267,14 +267,19 @@ def save_subtitle_file(
     result: ProviderSearchResult,
     content: bytes,
 ) -> tuple[Path, str]:
-    title_dir = subs_root / str(tmdb_id)
+    # Save under: <subs_root>/<year>/<safe_title>/
+    title_dir = subs_root / str(year) / safe_name(title)
     title_dir.mkdir(parents=True, exist_ok=True)
 
     name_base = f"{safe_name(title)}_{year}_{result.provider}_{result.provider_sub_id}_{safe_name(result.file_name)}"
     file_name = f"{name_base}.bin"
     out_path = title_dir / file_name
 
-    out_path.write_bytes(content)
+    # Atomic write for content
+    tmp_out = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_out.write_bytes(content)
+    os.replace(tmp_out, out_path)
+
     digest = hashlib.sha256(content).hexdigest()
 
     meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
@@ -290,7 +295,12 @@ def save_subtitle_file(
         "sha256": digest,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    # Atomic write for metadata
+    tmp_meta = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    tmp_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_meta, meta_path)
+
     return out_path, digest
 
 
