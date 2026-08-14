@@ -642,7 +642,11 @@ def run(config: IngestConfig) -> int:
             os.fsync(output_file.fileno())
 
         total_new_written += year_new_written
-        completed_years.add(year)
+        # Do not mark the current year as completed so subsequent runs
+        # can pick up newly-added movies during the year unless the
+        # user explicitly requests recheck via --recheck-completed-years.
+        if year < current_year:
+            completed_years.add(year)
         in_progress_pages = {}
         persist_sync_state(
             state_path=sync_state_path,
