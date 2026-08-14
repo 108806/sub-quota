@@ -1,0 +1,38 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+.env/
+env/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs and reports
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# Runtime/state and large data
+.env
+data/catalog/
+subs/
+
+# Wheel metadata
+pip-wheel-metadata/
+share/python-wheels/
+
+# Database
+*.sqlite3
