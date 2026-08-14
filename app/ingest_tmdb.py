@@ -476,8 +476,7 @@ def normalize_movie(movie: dict[str, Any], fallback_year: int, fetched_at: str) 
     }
 
 
-def state_path_for_output(output_path: Path) -> Path:
-    return output_path.parent.parent / "state" / "tmdb_ingest_state.json"
+
 
 
 def load_existing_tmdb_ids(output_path: Path) -> set[int]:
@@ -508,41 +507,10 @@ def load_existing_tmdb_ids(output_path: Path) -> set[int]:
     return ids
 
 
-def load_sync_state(state_path: Path) -> dict[str, Any]:
-    if not state_path.exists() or not state_path.is_file():
-        return {}
-
-    try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
 
 
-def save_sync_state(state_path: Path, state: dict[str, Any]) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def persist_sync_state(
-    *,
-    state_path: Path,
-    completed_years: set[int],
-    in_progress_pages: dict[str, int],
-    output_path: Path,
-    catalog_unique_count: int,
-    start_year: int,
-    end_year: int,
-) -> None:
-    sync_state = {
-        "completed_years": sorted(completed_years),
-        "in_progress_pages": in_progress_pages,
-        "last_run_at": datetime.now(timezone.utc).isoformat(),
-        "catalog_path": output_path.as_posix(),
-        "catalog_unique_count": catalog_unique_count,
-        "start_year": start_year,
-        "end_year": end_year,
-    }
-    save_sync_state(state_path, sync_state)
 
 
 def run(config: IngestConfig) -> int:
@@ -552,32 +520,33 @@ def run(config: IngestConfig) -> int:
     current_year = datetime.now(timezone.utc).year
 
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
-    sync_state_path = state_path_for_output(config.output_path)
 
     print("=" * 90)
     print(f"CATALOG OUTPUT DIR : {config.output_path.parent}")
-    print(f"SYNC STATE FILE    : {sync_state_path}")
     print("MODE               : append-only (existing records are never removed)")
     print("=" * 90)
 
     if config.full_refresh:
-        print("Full refresh enabled: rebuilding output and resetting sync state.")
+        print("Full refresh enabled: rebuilding output and resetting ingest state.")
         seen_tmdb_ids: set[int] = set()
         completed_years: set[int] = set()
         in_progress_pages: dict[str, dict[str, Any]] = {}
     else:
         seen_tmdb_ids = load_existing_tmdb_ids(config.output_path)
-        state = load_sync_state(sync_state_path)
-        completed_years = {
-            year
-            for year in state.get("completed_years", [])
-            if isinstance(year, int)
-        }
-        in_progress_pages = {
-            key: value
-            for key, value in state.get("in_progress_pages", {}).items()
-            if isinstance(key, str) and isinstance(value, dict)
-        }
+
+        # Derive completed years from existing per-year catalog files
+        completed_years = set()
+        catalog_dir = config.output_path.parent
+        for path in catalog_dir.glob("movies_*.jsonl"):
+            stem = path.stem
+            if stem.startswith("movies_"):
+                try:
+                    y = int(stem[len("movies_"):])
+                    completed_years.add(y)
+                except Exception:
+                    continue
+
+        in_progress_pages = {}
 
     print(f"Existing movies in catalog: {len(seen_tmdb_ids)}")
     print(f"Output file exists now: {config.output_path.exists()}")
@@ -631,15 +600,6 @@ def run(config: IngestConfig) -> int:
                     "window_end": end_date.isoformat(),
                     "last_page": page,
                 }
-                persist_sync_state(
-                    state_path=sync_state_path,
-                    completed_years=completed_years,
-                    in_progress_pages=in_progress_pages,
-                    output_path=config.output_path,
-                    catalog_unique_count=len(seen_tmdb_ids),
-                    start_year=config.start_year,
-                    end_year=config.end_year,
-                )
 
             # Ensure year file durability
             output_file.flush()
@@ -652,15 +612,6 @@ def run(config: IngestConfig) -> int:
         if year < current_year:
             completed_years.add(year)
         in_progress_pages = {}
-        persist_sync_state(
-            state_path=sync_state_path,
-            completed_years=completed_years,
-            in_progress_pages=in_progress_pages,
-            output_path=config.output_path,
-            catalog_unique_count=len(seen_tmdb_ids),
-            start_year=config.start_year,
-            end_year=config.end_year,
-        )
 
         year_pct = (year_index / total_years) * 100
         elapsed = time.time() - started
